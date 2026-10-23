@@ -19,8 +19,8 @@ lint: _check_uv
 	$(UV) run --extra dev ruff format --check .
 	$(UV) run --extra dev ty check src/
 
-publish:
-	bash scripts/publish.sh
+publish: _check_uv
+	$(UV) run --script scripts/publish.py
 
 _check_uv:
 ifndef UV
