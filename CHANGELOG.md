@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.2 - 2026-10-28
+
+- HTML-only email bodies keep link targets as `[text](url)` instead of dropping them. Entities are decoded once, so URLs such as `?a=1&copy=2` are no longer mangled.
+
+## 0.5.1 - 2026-10-28
+
+- `list_senders` rows add `unsubscribe_message_id`, the message the `unsubscribe` value came from; `unsubscribe_one_click` now points at it instead of `latest_message_id`, which may have no header.
+- Out-of-range `max_messages` in `list_senders` and `read_thread` is reported under its own name instead of `max_results`.
+
 ## 0.5.0 - 2026-10-28
 
 - Unsubscribe: `list_emails`, `read_email`, and `read_thread` return a parsed `unsubscribe` field from `List-Unsubscribe` / `List-Unsubscribe-Post`.

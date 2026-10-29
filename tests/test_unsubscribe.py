@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from google_mcp import gmail
+from google_mcp.utils import bounded_int
 
 ONE_CLICK = {"list-unsubscribe-post": "List-Unsubscribe=One-Click"}
 
@@ -167,7 +168,9 @@ def test_list_senders_groups_by_address(monkeypatch: pytest.MonkeyPatch) -> None
         "subjects": ["s2", "s1"],
         "labels": ["CATEGORY_PROMOTIONS", "CATEGORY_UPDATES"],
         "unsubscribe": {"urls": ["https://example.com/u"]},
+        "unsubscribe_message_id": "a",
     }
+    assert "unsubscribe_message_id" not in result["senders"][1]
 
 
 def test_list_senders_retries_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -183,3 +186,21 @@ def test_list_senders_retries_rate_limit(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(gmail.time, "sleep", lambda seconds: None)
     assert gmail._metadata("m1") == {"id": "m1"}
     assert len(attempts) == 2
+
+
+@pytest.mark.parametrize(
+    ("value", "message"), [(0, "between 1 and 2000"), (2001, "between 1 and 2000"), ("5", "an integer")]
+)
+def test_list_senders_names_max_messages(value: Any, message: str) -> None:
+    with pytest.raises(ValueError, match=f"^max_messages must be .*{message}"):
+        gmail.list_senders(max_messages=value)
+
+
+def test_read_thread_names_max_messages() -> None:
+    with pytest.raises(ValueError, match="^max_messages must be between 1 and 50"):
+        gmail.read_thread("t1", max_messages=51)
+
+
+def test_bounded_int_defaults_to_max_results() -> None:
+    with pytest.raises(ValueError, match="^max_results must be between 1 and 50"):
+        bounded_int(0, default=10)

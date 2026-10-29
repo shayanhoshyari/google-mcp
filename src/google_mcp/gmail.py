@@ -16,7 +16,6 @@ from datetime import UTC, datetime
 from email import message_from_bytes, policy
 from email.message import EmailMessage, Message
 from email.utils import getaddresses
-from html import unescape
 from html.parser import HTMLParser
 from typing import Any, cast, override
 from urllib.parse import parse_qs, quote, unquote, urlsplit
@@ -50,20 +49,44 @@ class _HTMLText(HTMLParser):
         super().__init__()
         self.fragments: list[str] = []
         self.ignored = 0
+        self.link: tuple[int, str] | None = None  # (fragment index where the open <a> starts, its href)
 
     @override
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in {"script", "style", "head"}:
             self.ignored += 1
-        elif not self.ignored and tag in {"br", "p", "div", "li", "tr", "h1", "h2", "h3", "h4"}:
+        elif self.ignored:
+            return
+        elif tag == "a":
+            self._close_link()
+            href = (dict(attrs).get("href") or "").strip()
+            if urlsplit(href).scheme.lower() in {"http", "https", "mailto"}:
+                self.link = (len(self.fragments), href)
+        elif tag == "img" and self.link:
+            self.fragments.append(dict(attrs).get("alt") or "")
+        elif tag in {"br", "p", "div", "li", "tr", "h1", "h2", "h3", "h4"}:
             self.fragments.append("\n")
 
     @override
     def handle_endtag(self, tag: str) -> None:
         if tag in {"script", "style", "head"} and self.ignored:
             self.ignored -= 1
-        elif not self.ignored and tag in {"p", "div", "li", "tr"}:
+        elif self.ignored:
+            return
+        elif tag == "a":
+            self._close_link()
+        elif tag in {"p", "div", "li", "tr"}:
             self.fragments.append("\n")
+
+    def _close_link(self) -> None:
+        """Rewrite the open link's fragments as `[text](href)`, or the bare href when the text is empty or the URL."""
+        if not self.link:
+            return
+        start, href = self.link
+        self.link = None
+        label = re.sub(r"\s+", " ", "".join(self.fragments[start:])).strip()
+        bare = href.removeprefix("mailto:")
+        self.fragments[start:] = [f"[{label}]({href})" if label and label not in {href, bare} else href]
 
     @override
     def handle_data(self, data: str) -> None:
@@ -71,7 +94,9 @@ class _HTMLText(HTMLParser):
             self.fragments.append(data)
 
     def text(self) -> str:
-        raw = unescape("".join(self.fragments)).replace("\r", "")
+        self._close_link()
+        # convert_charrefs already decoded entities; decoding again would corrupt URLs such as `?a=1&copy=2`.
+        raw = "".join(self.fragments).replace("\r", "")
         raw = re.sub(r"[ \t]+", " ", raw)
         raw = re.sub(r" *\n *", "\n", raw)
         return re.sub(r"\n{3,}", "\n\n", raw).strip()
@@ -308,7 +333,7 @@ def read_email(message_id: str) -> dict[str, Any]:
 def read_thread(thread_id: str, max_messages: int | None = None) -> dict[str, Any]:
     """Read messages from one thread in chronological order."""
     thread_id = require_text(thread_id, "thread_id")
-    limit = bounded_int(max_messages, default=25)
+    limit = bounded_int(max_messages, default=25, name="max_messages")
     value = request("GET", f"{BASE_URL}/threads/{quote(thread_id, safe='')}", params={"format": "full"})
     messages = value.get("messages", [])
     normalized = (
@@ -350,6 +375,7 @@ def _sender_row(messages: list[dict[str, Any]]) -> dict[str, Any]:
     parsed = [getaddresses([str(message.get("from") or "")])[0] for message in messages]
     address = parsed[0][1]
     name = next((value for value, _ in parsed if value), None)
+    source = next((message for message in messages if message.get("unsubscribe")), None)
     return compact(
         {
             "address": address.lower() or str(latest.get("from") or ""),
@@ -359,14 +385,15 @@ def _sender_row(messages: list[dict[str, Any]]) -> dict[str, Any]:
             "latest_message_id": latest.get("id"),
             "subjects": subjects,
             "labels": labels,
-            "unsubscribe": next((m["unsubscribe"] for m in messages if m.get("unsubscribe")), None),
+            "unsubscribe": source.get("unsubscribe") if source else None,
+            "unsubscribe_message_id": source.get("id") if source else None,
         }
     )
 
 
 def list_senders(query: str | None = None, max_messages: int | None = None) -> dict[str, Any]:
     """Group up to max_messages matching messages by sender address, with each sender's unsubscribe methods."""
-    limit = bounded_int(max_messages, default=500, maximum=2000)
+    limit = bounded_int(max_messages, default=500, maximum=2000, name="max_messages")
     q = query.strip() if query and query.strip() else SENDERS_QUERY
     ids: list[str] = []
     page_token = None

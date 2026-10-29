@@ -91,7 +91,8 @@ TOOLS = [
         description=(
             "Group recent Gmail messages by sender address to find bulk senders: count, latest date and "
             "message_id, recent subjects, category labels, and the unsubscribe methods from the sender's "
-            "List-Unsubscribe header. Read-only; 500 messages take about 25 seconds."
+            "newest List-Unsubscribe header with the ID of that message (unsubscribe_message_id). Read-only; "
+            "500 messages take about 25 seconds."
         ),
         inputSchema={
             "type": "object",
@@ -117,7 +118,10 @@ TOOLS = [
             "properties": {
                 "message_id": {
                     "type": "string",
-                    "description": "Gmail message ID from the sender, such as latest_message_id from list_senders",
+                    "description": (
+                        "Gmail message ID whose header has the one-click method, such as "
+                        "unsubscribe_message_id from list_senders"
+                    ),
                 }
             },
             "required": ["message_id"],

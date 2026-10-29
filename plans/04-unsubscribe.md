@@ -109,3 +109,12 @@ The user asked, while reviewing this plan, to remove overlap between the docs. D
 - `README.md`: a landing page: what it is, what it can change, the tool list, and links. The per-tool behavior sections (drafts, unsubscribing, Drive) duplicated `DESIGN.md` §5 and are removed, as is the stale manual test session (test sessions live in `plans/`).
 - `DESIGN.md` §2 and §8: links and the docs rule updated to match.
 
+
+## Review fixes (2026-10-28)
+
+Released as 0.5.1 (`pyproject.toml`, `uv.lock`, `CHANGELOG.md`):
+
+- `list_senders` rows add `unsubscribe_message_id`, the message the `unsubscribe` value came from. `latest_message_id` is the newest message, which may have no header, so passing it to `unsubscribe_one_click` could fail. The `unsubscribe_one_click` `message_id` description and the `list_senders` description now name `unsubscribe_message_id`; `DESIGN.md` lists the field.
+- `bounded_int` takes a `name` (default `max_results`) for its error messages; `list_senders` and `read_thread` pass `max_messages`. The other callers take `max_results`.
+
+`tests/test_unsubscribe.py`: the grouping test now checks that `unsubscribe_message_id` points at the older message with the header while `latest_message_id` points at the newer one without it, and is absent for a sender with no header. New tests cover the `max_messages` name in `list_senders` and `read_thread` errors and the `max_results` default. `make test`: 29 passed; `make lint` passes.

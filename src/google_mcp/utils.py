@@ -6,14 +6,16 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 
-def bounded_int(value: int | None, *, default: int, minimum: int = 1, maximum: int = 50) -> int:
-    """Return an integer inside the requested inclusive range."""
+def bounded_int(
+    value: int | None, *, default: int, minimum: int = 1, maximum: int = 50, name: str = "max_results"
+) -> int:
+    """Return an integer inside the requested inclusive range; name is the parameter named in errors."""
     if value is None:
         return default
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError("max_results must be an integer")
+        raise ValueError(f"{name} must be an integer")
     if value < minimum or value > maximum:
-        raise ValueError(f"max_results must be between {minimum} and {maximum}")
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
     return value
 
 

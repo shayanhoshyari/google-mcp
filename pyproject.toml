@@ -1,6 +1,6 @@
 [project]
 name = "xiaoverse-google-mcp"
-version = "0.5.0"
+version = "0.5.2"
 description = "Local MCP server for personal Gmail, Google Calendar, and Google Drive access"
 requires-python = ">=3.13"
 dependencies = [
