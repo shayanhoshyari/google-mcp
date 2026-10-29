@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 - 2026-10-28
+
+- Unsubscribe: `list_emails`, `read_email`, and `read_thread` return a parsed `unsubscribe` field from `List-Unsubscribe` / `List-Unsubscribe-Post`.
+- New `list_senders` groups recent mail by sender with counts, labels, and unsubscribe methods.
+- New `unsubscribe_one_click` POSTs the RFC 8058 one-click unsubscribe to the URL in a message's own header. This is the server's only request outside Google. No new scopes.
+- Add offline tests (`tests/`, `make test`) with `pytest` in the dev extra.
+
 ## 0.4.0 - 2026-10-22
 
 - Gmail attachments: `read_email`, `read_thread`, and the new `read_draft` list attachments; the new `download_attachment` saves one to local disk.

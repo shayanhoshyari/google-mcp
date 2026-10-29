@@ -2,7 +2,7 @@
 
 ## 1. Purpose
 
-A local, stdio MCP server for personal Gmail, Google Calendar, and Google Drive access. Gmail is read-only except drafts, which the server can create and edit (with attachments) but never send, and attachments of messages and drafts can be downloaded; Calendar can manage events, and Drive can search, inspect, and download any file the user can see, while uploads and updates are limited to files the app itself created. The server calls Google's public Gmail, Calendar, and Drive REST APIs directly with delegated OAuth authorization. It is implemented in this repository and does not depend on a hosted MCP service or copy code from another MCP project.
+A local, stdio MCP server for personal Gmail, Google Calendar, and Google Drive access. Gmail is read-only except drafts, which the server can create and edit (with attachments) but never send, and attachments of messages and drafts can be downloaded; the server can also send the RFC 8058 one-click unsubscribe request named in a message's own header; Calendar can manage events, and Drive can search, inspect, and download any file the user can see, while uploads and updates are limited to files the app itself created. The server calls Google's public Gmail, Calendar, and Drive REST APIs directly with delegated OAuth authorization. It is implemented in this repository and does not depend on a hosted MCP service or copy code from another MCP project.
 
 The design follows `agents/mcp/microsoft_agent_v2`: readable per-service modules, a small shared API/auth layer, standalone installation, local token storage, and design documentation as the source of truth.
 
@@ -11,9 +11,10 @@ The design follows `agents/mcp/microsoft_agent_v2`: readable per-service modules
 ```text
 MCP client → local google-mcp process → Gmail API / Calendar API / Drive API
                                  ↘ local OAuth state
+                                 ↘ one-click unsubscribe POST (sender's server; unsubscribe_one_click only)
 ```
 
-The server uses MCP stdio transport and is installed into a standalone venv at `~/.claude/google_mcp/venv/`. The source checkout is not needed after installation. The installer registers `google-mcp` with Claude Code, Cursor, Codex (if available), and OpenCode, preserving unrelated settings and MCP entries. It refuses invalid configuration; JSONC rewriting removes comments. See [local files](README.md#local-files) for registration paths and [INSTALL.md](INSTALL.md) for maintenance.
+The server uses MCP stdio transport and is installed into a standalone venv at `~/.claude/google_mcp/venv/`. The source checkout is not needed after installation. The installer registers `google-mcp` with Claude Code, Cursor, Codex (if available), and OpenCode, preserving unrelated settings and MCP entries. It refuses invalid configuration; JSONC rewriting removes comments. See [INSTALL.md](INSTALL.md) for setup, registration paths, and maintenance.
 
 Local configuration and credentials live beside the standalone venv in `~/.claude/google_mcp/config/`:
 
@@ -24,7 +25,7 @@ Local configuration and credentials live beside the standalone venv in `~/.claud
   drive.json           # ID of the app-created mcp_default Drive folder; mode 0600
 ```
 
-All credentials and tokens remain local. Gmail, Calendar, and Drive API calls go directly from the local process to Google over HTTPS.
+All credentials and tokens remain local. Gmail, Calendar, and Drive API calls go directly from the local process to Google over HTTPS. The one request outside Google is `unsubscribe_one_click` (see [unsubscribe](#unsubscribe)), which carries no Google credentials.
 
 ## 3. Authentication
 
@@ -39,7 +40,7 @@ The CLI provides:
 
 Access tokens are refreshed silently while the refresh token is valid. On `invalid_grant`, missing credentials, or expired Testing-mode refresh token, tools return a clear instruction to run `google-mcp auth`. Never include token values in messages or logs.
 
-For a personal Google account, configure the user's own Cloud OAuth project as External / Testing and add that Gmail address as a test user. Testing-mode refresh tokens for Gmail, Calendar, and Drive scopes expire after seven days. The expected private-use workflow is to run `google-mcp auth` again when that happens. Per-file `drive.file` grants belong to the Cloud project, so they survive that reauthorization. Each release that adds scopes needs those scopes added to the consent screen and one `google-mcp auth` run after upgrading: 0.2.0 (Drive scopes) and 0.3.0 (`gmail.compose`); 0.4.0 adds none; Google Workspace Developer Preview membership is not required for this local implementation.
+For a personal Google account, configure the user's own Cloud OAuth project as External / Testing and add that Gmail address as a test user. Testing-mode refresh tokens for Gmail, Calendar, and Drive scopes expire after seven days. The expected private-use workflow is to run `google-mcp auth` again when that happens. Per-file `drive.file` grants belong to the Cloud project, so they survive that reauthorization. Each release that adds scopes needs those scopes added to the consent screen and one `google-mcp auth` run after upgrading: 0.2.0 (Drive scopes) and 0.3.0 (`gmail.compose`); 0.4.0 and 0.5.0 add none; Google Workspace Developer Preview membership is not required for this local implementation.
 
 ## 4. OAuth scopes
 
@@ -67,6 +68,8 @@ Google has no drafts-only scope: `gmail.compose` also permits sending mail and d
 | `list_emails` | `query?`, `max_results?`, `page_token?` | List inbox messages by default or search with Gmail query syntax. Return compact metadata and snippets. |
 | `read_email` | `message_id` | Return headers, decoded plain-text body, and `attachments` (when any) for one message or draft message. If the message has only HTML, return readable text derived from the HTML. |
 | `read_thread` | `thread_id`, `max_messages?` | Return messages in chronological order, with headers, readable bodies, and `attachments` (when any). |
+| `list_senders` | `query?` (default `newer_than:90d -in:sent -in:chats`), `max_messages?` (1–2000, default 500) | Group matching messages by sender address with counts and unsubscribe methods. Read-only. See [unsubscribe](#unsubscribe). |
+| `unsubscribe_one_click` | `message_id` | POST the RFC 8058 one-click unsubscribe to the `https` URL in that message's `List-Unsubscribe` header. See [unsubscribe](#unsubscribe). |
 | `download_attachment` | `message_id`, `filename`, `part_id?`, `path?`, `overwrite?` (default false) | Save one attachment of a message or draft to local disk; return absolute path, byte size, and MIME type. See attachments below and the [path rules](#path-rules). |
 | `list_drafts` | `query?`, `max_results?`, `page_token?` | List drafts (optionally filtered with Gmail query syntax) with `draft_id`, `message_id`, `thread_id`, sender, recipients, subject, snippet, and `has_attachments`. |
 | `read_draft` | `draft_id` | Return the full normalized draft, including body and `attachments`. |
@@ -93,6 +96,16 @@ Google has no drafts-only scope: `gmail.compose` also permits sending mail and d
 - Gmail marks pasted images in a forwarded message as `attachment` disposition with a `Content-ID`, so they are not flagged `inline`.
 - A bounce (`multipart/report`) carries the original as an expanded `message/rfc822` part with no filename or `attachmentId`; it is listed as `attachment-<part_id>.eml` and downloads as a complete email through the raw message.
 - `download_attachment` honors the path rules: default cache, explicit directory, refusal without `overwrite`, overwrite with it.
+
+<a id="unsubscribe"></a>**Unsubscribe.** Bulk mail carries `List-Unsubscribe` (RFC 2369): one or more `<uri>` values, `https:` or `mailto:`. With `List-Unsubscribe-Post: List-Unsubscribe=One-Click` (RFC 8058), an HTTPS POST of `List-Unsubscribe=One-Click` to the `https` URI unsubscribes with no page to visit; this is what Gmail's own Unsubscribe button uses. The Gmail API has no unsubscribe endpoint.
+
+`list_emails`, `read_email`, and `read_thread` request both headers and, when `List-Unsubscribe` yields a usable method, return `unsubscribe`: `one_click_url` (the first `https` URI, only when the one-click `List-Unsubscribe-Post` value is present, compared case-insensitively), `urls` (the other `http(s)` URIs with a host), and `mailto` (`to`, `subject`, `body` from the first `mailto:` URI with an address; query values are percent-decoded). Whitespace inside the angle brackets (line folding) is removed; URIs with other schemes and malformed values are ignored, and the field is absent when nothing usable is left.
+
+`list_senders` pages `messages.list` (500 per page) up to `max_messages`, then reads each message's metadata on 8 worker threads, retrying a 429 or rate-limit 403 up to three times with backoff (1, 2, 4 s) and skipping messages deleted in between. Messages are grouped by lower-cased `From` address. Each row has `address`, `name` (the latest non-empty display name), `count`, `latest_date`, `latest_message_id`, up to three recent distinct `subjects`, `labels` (the union of `CATEGORY_*` labels), and `unsubscribe` from the most recent message that has one. Rows sort by `count`, descending. The result also has `scanned` (messages read, equal to the sum of counts), `more_messages` (the query matched more than `max_messages`), and `query`.
+
+`unsubscribe_one_click` re-reads the message's headers and requires a `one_click_url`; otherwise it fails before any network call and lists the methods found. It refuses a host that resolves to a non-public address (loopback, private, link-local), since the header is written by the sender. It then POSTs `List-Unsubscribe=One-Click` as `application/x-www-form-urlencoded` with `requests.post`: no cookies, no Google credentials, a 15-second timeout, and redirects not followed. It returns `sender`, `host`, HTTP `status`, and `ok` (2xx). Other statuses and network errors are reported, not retried. The URL always comes from the message header, never from a tool argument. `mailto:` methods are handled with `create_draft` (the user sends it); plain links and body-only links are left for the user to open. Not in this version: archive, delete, labels, filters, blocking, following body links, and sending `mailto:` unsubscribes.
+
+Tested against the live API on 2026-10-28 with the personal account: bulk mail returns `unsubscribe` from `list_emails` and the same value from `read_email`, while sent mail and transactional messages (login codes, security alerts) have none. `list_senders` with the defaults read 500 messages in about 24 seconds with no quota errors; of 178 senders, 101 offered one-click, 3 only `mailto:`, 3 only a plain link, and 71 had no header. `unsubscribe_one_click` on a Klaviyo-hosted list returned HTTP 200.
 
 **Normalized draft object.** `draft_id`, `message_id`, `thread_id`, `from`, `to`, `cc`, `bcc`, `subject`, `in_reply_to`, `snippet`, then `has_attachments` in `list_drafts`, or `body`, `body_truncated`, and `attachments` (always present, possibly empty) everywhere else.
 
@@ -204,7 +217,8 @@ Tested against the live API on 2026-10-04 with the personal account:
 | Operation | Google API |
 |---|---|
 | List/search messages | `GET /gmail/v1/users/me/messages` with `q`, `maxResults`, and `pageToken` |
-| Read message headers/snippet | `GET /gmail/v1/users/me/messages/{id}?format=metadata` |
+| Read message headers/snippet | `GET /gmail/v1/users/me/messages/{id}?format=metadata` with `metadataHeaders` From, To, Subject, Date, List-Unsubscribe, List-Unsubscribe-Post |
+| One-click unsubscribe (not Google) | `POST <one_click_url>` with body `List-Unsubscribe=One-Click` |
 | Read full message | `GET /gmail/v1/users/me/messages/{id}?format=full` |
 | Read thread | `GET /gmail/v1/users/me/threads/{id}?format=full` |
 | Identify account | `GET /gmail/v1/users/me/profile` |
@@ -274,9 +288,9 @@ For Gmail drafts, 403 insufficient scopes becomes "Gmail draft access is not aut
 ## 8. Development and documentation contract
 
 - `DESIGN.md` and `src/google_mcp/instructions.md` define behavior and agent guidance.
-- User docs (`README.md` and `INSTALL.md`) are derived from this design.
-- `README.md` must explain the one-time personal OAuth setup: create a Cloud project, enable the Gmail, Calendar, and Drive APIs, configure External / Testing consent, add the Gmail address as a test user, create a Desktop OAuth client, authorize with `google-mcp auth`, acknowledge the unverified-app warning, and expect weekly reauthorization while Testing mode is used. It must list all six scopes for the consent screen, state that `mcp_default` is created by the app, and explain that existing tokens need one `google-mcp auth` run to gain new scopes.
-- `README.md` must clearly state Gmail messages are read-only and drafts are created or edited but never sent, Calendar writes can notify attendees, Drive writes touch only app-created files, and the local server still sends API requests directly to Google.
+- User docs are derived from this design and link to it instead of repeating tool behavior.
+- `README.md` is the landing page: what the server is, what it can change (Gmail messages read-only and drafts never sent, one-click unsubscribe contacts the sender's server, Calendar writes can notify attendees, Drive writes touch only app-created files, requests go directly to Google), the tool list, and links.
+- `INSTALL.md` holds everything about setup: the one-time personal OAuth setup (Cloud project, Gmail, Calendar, and Drive APIs, External / Testing consent with the Gmail address as a test user, Desktop OAuth client, all six scopes, the unverified-app warning, weekly reauthorization in Testing mode), install, `configure`/`auth`/`status`, updates (new scopes need one `auth` run), local files and client registration, and removal.
 
 ## 9. Security and data flow
 
@@ -284,7 +298,7 @@ The MCP client starts the installed Python process over stdio. The process reads
 
 `google-mcp auth` uses the Desktop-app flow described in section 3. The browser sends the authorization code to the loopback listener; the server checks the state, exchanges the code, and stores the refresh token with file mode `0600`. Tokens are never intentionally written to MCP output or logs.
 
-Gmail reads use `gmail.readonly`; draft writes use `gmail.compose`. The server exposes no send, label, archive, or delete operation. Draft `attachments` read the local files they name, so only files the user asked for are attached; `download_attachment` writes to the local disk, and downloaded attachment content is untrusted data. Because Google bundles sending into `gmail.compose`, the stored token is technically able to send mail; the no-send guarantee comes from the tool surface. Drive reads use `drive.readonly`; Drive writes use `drive.file`, which Google limits to files the app created. `download_file` writes to the local disk and `upload_file` reads the local file it is given, so Drive content is untrusted data. Calendar event writes call Google immediately; shared-event updates, deletion, and invitation responses use Google's attendee notification option, so other people can receive updates. RSVP changes fetch the event first, preserve every attendee, and change only the authorized account's response. Gmail content is untrusted data even when it appears in an MCP result.
+Gmail reads use `gmail.readonly`; draft writes use `gmail.compose`. The server exposes no send, label, archive, or delete operation. `unsubscribe_one_click` is the only request outside Google: it goes to the sender-controlled URL in the message's own header, without Google credentials or cookies, after the host is checked to resolve to public addresses; the agent instructions limit it to senders the user approved. Draft `attachments` read the local files they name, so only files the user asked for are attached; `download_attachment` writes to the local disk, and downloaded attachment content is untrusted data. Because Google bundles sending into `gmail.compose`, the stored token is technically able to send mail; the no-send guarantee comes from the tool surface. Drive reads use `drive.readonly`; Drive writes use `drive.file`, which Google limits to files the app created. `download_file` writes to the local disk and `upload_file` reads the local file it is given, so Drive content is untrusted data. Calendar event writes call Google immediately; shared-event updates, deletion, and invitation responses use Google's attendee notification option, so other people can receive updates. RSVP changes fetch the event first, preserve every attendee, and change only the authorized account's response. Gmail content is untrusted data even when it appears in an MCP result.
 
 The local MCP does not send data through a third-party MCP host. It sends the OAuth exchange and every API request directly to Google. To revoke access, run `google-mcp clear-auth` to delete the local tokens and remove the app under the Google Account's third-party connections to revoke Google's copy of the grant. While the OAuth app is External/Testing, expect to repeat browser authorization about every seven days.
 
@@ -294,6 +308,7 @@ The local MCP does not send data through a third-party MCP host. It sends the OA
 - [Google OAuth 2.0 best practices](https://developers.google.com/identity/protocols/oauth2/resources/best-practices)
 - [Gmail messages.list](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/list)
 - [Gmail API scopes](https://developers.google.com/workspace/gmail/api/auth/scopes)
+- [RFC 2369 List-Unsubscribe](https://www.rfc-editor.org/rfc/rfc2369) and [RFC 8058 one-click unsubscribe](https://www.rfc-editor.org/rfc/rfc8058)
 - [Gmail drafts.update](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.drafts/update)
 - [Gmail drafts.create (media upload)](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.drafts/create)
 - [Gmail messages.attachments.get](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages.attachments/get)

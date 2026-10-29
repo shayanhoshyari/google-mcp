@@ -1,6 +1,6 @@
 UV := $(shell command -v uv 2>/dev/null)
 
-.PHONY: dev auth status lint install publish _check_uv
+.PHONY: dev auth status lint test install publish _check_uv
 
 install:
 	bash scripts/install.py
@@ -18,6 +18,9 @@ lint: _check_uv
 	$(UV) run --extra dev ruff check .
 	$(UV) run --extra dev ruff format --check .
 	$(UV) run --extra dev ty check src/
+
+test: _check_uv
+	$(UV) run --extra dev pytest -q tests/
 
 publish: _check_uv
 	$(UV) run --script scripts/publish.py

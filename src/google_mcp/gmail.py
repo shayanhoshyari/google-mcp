@@ -1,11 +1,15 @@
-"""Gmail operations: read messages, threads, and attachments; create and edit drafts (never send)."""
+"""Gmail operations: read messages, threads, and attachments; create and edit drafts (never send); unsubscribe."""
 
 from __future__ import annotations
 
 import base64
+import ipaddress
 import mimetypes
 import re
+import socket
+import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -15,9 +19,11 @@ from email.utils import getaddresses
 from html import unescape
 from html.parser import HTMLParser
 from typing import Any, cast, override
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from google_mcp import local_files
+import requests
+
+from google_mcp import auth, local_files
 from google_mcp.auth import account_email
 from google_mcp.google_api import GoogleAPIError, multipart_upload, request
 from google_mcp.utils import bounded_int, compact, require_text
@@ -30,6 +36,13 @@ MAX_DRAFT_BYTES = 25 * 1024 * 1024  # Gmail's sending limit
 SCOPE_REASONS = {"ACCESS_TOKEN_SCOPE_INSUFFICIENT", "insufficientPermissions"}
 DRAFTS_NOT_AUTHORIZED = "Gmail draft access is not authorized yet; run `google-mcp auth`."
 DRAFT_NOT_FOUND = "Draft not found."
+
+METADATA_HEADERS = ["From", "To", "Subject", "Date", "List-Unsubscribe", "List-Unsubscribe-Post"]
+ONE_CLICK = "list-unsubscribe=one-click"
+UNSUBSCRIBE_TIMEOUT = 15
+SENDERS_QUERY = "newer_than:90d -in:sent -in:chats"
+SENDER_WORKERS = 8
+RATE_LIMIT_REASONS = {"rateLimitExceeded", "userRateLimitExceeded", "RATE_LIMIT_EXCEEDED"}
 
 
 class _HTMLText(HTMLParser):
@@ -166,6 +179,46 @@ def _attachment(part: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _mailto(uri: str) -> dict[str, Any] | None:
+    """Split a mailto: URI into recipient and the subject/body query values."""
+    parts = urlsplit(uri)
+    query = parse_qs(parts.query)
+    to = unquote(parts.path).strip() or (query.get("to") or [""])[0].strip()
+    if "@" not in to:
+        return None
+    return compact(
+        {
+            "to": to,
+            "subject": (query.get("subject") or [None])[0],
+            "body": (query.get("body") or [None])[0],
+        }
+    )
+
+
+def _unsubscribe(headers: dict[str, str]) -> dict[str, Any] | None:
+    """Parse List-Unsubscribe (RFC 2369) and List-Unsubscribe-Post (RFC 8058) into the unsubscribe methods."""
+    raw = headers.get("list-unsubscribe")
+    if not raw:
+        return None
+    # Whitespace inside the angle brackets (line folding) is not part of the URI.
+    uris = [re.sub(r"\s+", "", value) for value in re.findall(r"<([^>]*)>", raw)]
+    one_click = ONE_CLICK in re.sub(r"\s+", "", headers.get("list-unsubscribe-post", "")).lower()
+    one_click_url = None
+    urls: list[str] = []
+    mailto = None
+    for uri in uris:
+        scheme = urlsplit(uri).scheme.lower()
+        if scheme in {"http", "https"} and urlsplit(uri).hostname:
+            if scheme == "https" and one_click and one_click_url is None:
+                one_click_url = uri
+            elif uri not in urls:
+                urls.append(uri)
+        elif scheme == "mailto" and mailto is None:
+            mailto = _mailto(uri)
+    result = compact({"one_click_url": one_click_url, "urls": urls or None, "mailto": mailto})
+    return result or None
+
+
 def _internal_date(value: Any) -> str | None:
     try:
         return datetime.fromtimestamp(int(value) / 1000, UTC).isoformat().replace("+00:00", "Z")
@@ -188,6 +241,7 @@ def _normalize_metadata(message: dict[str, Any]) -> dict[str, Any]:
             "internal_date": _internal_date(message.get("internalDate")),
             "snippet": message.get("snippet"),
             "label_ids": message.get("labelIds", []),
+            "unsubscribe": _unsubscribe(headers),
         }
     )
 
@@ -231,7 +285,7 @@ def list_emails(
             value = request(
                 "GET",
                 f"{BASE_URL}/messages/{quote(message_id, safe='')}",
-                params={"format": "metadata", "metadataHeaders": ["From", "To", "Subject", "Date"]},
+                params={"format": "metadata", "metadataHeaders": METADATA_HEADERS},
             )
             results.append(_normalize_metadata(value))
     return compact(
@@ -263,6 +317,127 @@ def read_thread(thread_id: str, max_messages: int | None = None) -> dict[str, An
     normalized.sort(key=lambda item: str(item.get("internal_date", "")))
     truncated = len(normalized) > limit
     return {"thread_id": value.get("id", thread_id), "messages": normalized[:limit], "messages_truncated": truncated}
+
+
+def _metadata(message_id: str) -> dict[str, Any] | None:
+    """Read one message's metadata, backing off on Gmail's per-user rate limit; None if it was deleted."""
+    for attempt in range(4):
+        try:
+            return request(
+                "GET", _message_url(message_id), params={"format": "metadata", "metadataHeaders": METADATA_HEADERS}
+            )
+        except GoogleAPIError as exc:
+            if exc.status == 404:
+                return None
+            limited = exc.status == 429 or (exc.status == 403 and set(exc.reasons) & RATE_LIMIT_REASONS)
+            if not limited or attempt == 3:
+                raise
+            time.sleep(2**attempt)
+    return None
+
+
+def _sender_row(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize one sender's messages, newest first."""
+    latest = messages[0]
+    subjects: list[str] = []
+    for message in messages:
+        subject = message.get("subject")
+        if isinstance(subject, str) and subject and subject not in subjects and len(subjects) < 3:
+            subjects.append(subject)
+    labels = sorted(
+        {label for message in messages for label in message.get("label_ids", []) if label.startswith("CATEGORY_")}
+    )
+    parsed = [getaddresses([str(message.get("from") or "")])[0] for message in messages]
+    address = parsed[0][1]
+    name = next((value for value, _ in parsed if value), None)
+    return compact(
+        {
+            "address": address.lower() or str(latest.get("from") or ""),
+            "name": name,
+            "count": len(messages),
+            "latest_date": latest.get("internal_date"),
+            "latest_message_id": latest.get("id"),
+            "subjects": subjects,
+            "labels": labels,
+            "unsubscribe": next((m["unsubscribe"] for m in messages if m.get("unsubscribe")), None),
+        }
+    )
+
+
+def list_senders(query: str | None = None, max_messages: int | None = None) -> dict[str, Any]:
+    """Group up to max_messages matching messages by sender address, with each sender's unsubscribe methods."""
+    limit = bounded_int(max_messages, default=500, maximum=2000)
+    q = query.strip() if query and query.strip() else SENDERS_QUERY
+    ids: list[str] = []
+    page_token = None
+    more = False
+    while len(ids) < limit:
+        params: dict[str, Any] = {"q": q, "maxResults": min(500, limit - len(ids))}
+        if page_token:
+            params["pageToken"] = page_token
+        page = request("GET", f"{BASE_URL}/messages", params=params)
+        items = page.get("messages", [])
+        ids.extend(item["id"] for item in items if isinstance(item, dict) and isinstance(item.get("id"), str))
+        page_token = page.get("nextPageToken")
+        if not page_token or not items:
+            break
+    more = bool(page_token) or len(ids) > limit
+    ids = ids[:limit]
+    auth.access_token()  # refresh once up front, not from every worker at the same moment
+    with ThreadPoolExecutor(max_workers=SENDER_WORKERS) as pool:
+        fetched = list(pool.map(_metadata, ids))
+    messages = [_normalize_metadata(value) for value in fetched if value is not None]
+    messages.sort(key=lambda item: str(item.get("internal_date", "")), reverse=True)
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for message in messages:
+        sender = str(message.get("from") or "")
+        address = getaddresses([sender])[0][1].lower() or sender.strip().lower()
+        groups.setdefault(address, []).append(message)
+    senders = sorted((_sender_row(group) for group in groups.values()), key=lambda row: -row["count"])
+    return {"senders": senders, "scanned": len(messages), "more_messages": more, "query": q}
+
+
+def _check_public_host(host: str) -> None:
+    """Refuse hosts that resolve to loopback, private, or other non-public addresses."""
+    try:
+        addresses = {str(info[4][0]) for info in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)}
+    except OSError as exc:
+        raise ValueError(f"Could not resolve unsubscribe host {host}: {exc}") from exc
+    for address in addresses:
+        if not ipaddress.ip_address(address.split("%")[0]).is_global:
+            raise ValueError(f"Unsubscribe host {host} resolves to a non-public address; refusing")
+
+
+def unsubscribe_one_click(message_id: str) -> dict[str, Any]:
+    """POST the RFC 8058 one-click unsubscribe to the URL in the message's own List-Unsubscribe header."""
+    message_id = require_text(message_id, "message_id")
+    value = request("GET", _message_url(message_id), params={"format": "metadata", "metadataHeaders": METADATA_HEADERS})
+    raw_payload = value.get("payload")
+    headers = _headers(cast(dict[str, Any], raw_payload) if isinstance(raw_payload, dict) else {})
+    methods = _unsubscribe(headers) or {}
+    url = methods.get("one_click_url")
+    if not url:
+        raise ValueError(
+            "This message has no one-click unsubscribe (an https List-Unsubscribe URI with "
+            f"List-Unsubscribe-Post: List-Unsubscribe=One-Click); methods found: {methods or 'none'}"
+        )
+    host = urlsplit(url).hostname or ""
+    _check_public_host(host)
+    try:
+        response = requests.post(
+            url,
+            data={"List-Unsubscribe": "One-Click"},
+            timeout=UNSUBSCRIBE_TIMEOUT,
+            allow_redirects=False,
+        )
+    except requests.RequestException as exc:
+        raise ValueError(f"Unsubscribe request to {host} failed: {exc}") from exc
+    return {
+        "sender": headers.get("from"),
+        "host": host,
+        "status": response.status_code,
+        "ok": 200 <= response.status_code < 300,
+    }
 
 
 def _message_url(message_id: str) -> str:

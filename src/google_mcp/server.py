@@ -44,8 +44,8 @@ TOOLS = [
     Tool(
         name="list_emails",
         description=(
-            "List personal Gmail messages with compact metadata. Defaults to the inbox. "
-            "Use Gmail search syntax in query."
+            "List personal Gmail messages with compact metadata, including parsed unsubscribe methods when "
+            "the message has a List-Unsubscribe header. Defaults to the inbox. Use Gmail search syntax in query."
         ),
         inputSchema={
             "type": "object",
@@ -84,6 +84,43 @@ TOOLS = [
                 "max_messages": {"type": "integer", "minimum": 1, "maximum": 50},
             },
             "required": ["thread_id"],
+        },
+    ),
+    Tool(
+        name="list_senders",
+        description=(
+            "Group recent Gmail messages by sender address to find bulk senders: count, latest date and "
+            "message_id, recent subjects, category labels, and the unsubscribe methods from the sender's "
+            "List-Unsubscribe header. Read-only; 500 messages take about 25 seconds."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Gmail search query; defaults to newer_than:90d -in:sent -in:chats",
+                },
+                "max_messages": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 500},
+            },
+        },
+    ),
+    Tool(
+        name="unsubscribe_one_click",
+        description=(
+            "Unsubscribe from a sender with the RFC 8058 one-click method: POST List-Unsubscribe=One-Click to "
+            "the https URL in this message's own List-Unsubscribe header (never a URL you supply). This acts "
+            "outside Gmail, on the sender's server, and cannot be undone from here. Only run it for senders the "
+            "user approved. Refuses messages without a one-click header."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "message_id": {
+                    "type": "string",
+                    "description": "Gmail message ID from the sender, such as latest_message_id from list_senders",
+                }
+            },
+            "required": ["message_id"],
         },
     ),
     Tool(
@@ -414,6 +451,10 @@ def create_server() -> Server:
                 return _json(gmail.read_email(arguments["message_id"]))
             if name == "read_thread":
                 return _json(gmail.read_thread(arguments["thread_id"], arguments.get("max_messages")))
+            if name == "list_senders":
+                return _json(gmail.list_senders(arguments.get("query"), arguments.get("max_messages")))
+            if name == "unsubscribe_one_click":
+                return _json(gmail.unsubscribe_one_click(arguments["message_id"]))
             if name == "list_drafts":
                 return _json(
                     gmail.list_drafts(arguments.get("query"), arguments.get("max_results"), arguments.get("page_token"))
