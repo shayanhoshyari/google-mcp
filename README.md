@@ -2,6 +2,9 @@
 
 A local MCP server for a personal Google account: Gmail, Google Calendar, and Google Drive through Google's public APIs. The code and OAuth tokens stay on your computer; requests go directly to Google over HTTPS.
 
+> [!NOTE]
+> This is a personal project, shaped around the author's own use: a small, fixed set of tools with deliberately narrow permissions. For broader coverage, see [Google Workspace CLI](https://github.com/googleworkspace/cli), which uses a similar local OAuth setup but exposes every Google Workspace API through Google's Discovery Service.
+
 What it can change:
 
 - **Gmail** messages are read-only. Drafts can be created and edited, with attachments, but are never sent; you send them from Gmail. Google has no drafts-only permission, so the authorization technically allows sending, but no tool does it.
