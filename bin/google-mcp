@@ -1,0 +1,8 @@
+#!/bin/sh
+# Run the CLI from the standalone install (`make install`). Link this file onto PATH to get `google-mcp`.
+exe="$HOME/.claude/google_mcp/venv/bin/google-mcp"
+if [ ! -x "$exe" ]; then
+    echo "google-mcp is not installed; run \`make install\` in its source folder" >&2
+    exit 1
+fi
+exec "$exe" "$@"

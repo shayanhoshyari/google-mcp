@@ -38,7 +38,7 @@ Then configure and authorize:
 ~/.claude/google_mcp/venv/bin/google-mcp status
 ```
 
-From this directory, `uv run google-mcp <command>` does the same and uses the same OAuth files. `auth` opens Google in your browser and listens briefly on a random `127.0.0.1` port for Google's callback. Restart your MCP client after installation and authorization. Re-run `auth` whenever Google says the authorization has expired.
+From this directory, `uv run google-mcp <command>` does the same and uses the same OAuth files. To run `google-mcp` from anywhere, link `bin/google-mcp` (a wrapper around the installed command) into a folder on your `PATH`, such as `~/.local/bin/`. `auth` opens Google in your browser and listens briefly on a random `127.0.0.1` port for Google's callback. Restart your MCP client after installation and authorization. Re-run `auth` whenever Google says the authorization has expired.
 
 ## Updates
 
