@@ -18,6 +18,10 @@ What it can change:
 - Calendar: `list_calendars`, `list_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `respond_to_event`
 - Drive: `search_files`, `get_file`, `download_file`, `upload_file`, `update_file`
 
+## Binary sync CLI
+
+`google-mcp files pull` / `push` keep a folder of binaries that code needs (assets, data) in your Drive, with only a small sorted `files.toml` manifest in git. Uploads go to an app-created `google_mcp_files` folder and are never changed or deleted. See [DESIGN.md](DESIGN.md#11-binary-sync-cli).
+
 ## More
 
 - [INSTALL.md](INSTALL.md): Google Cloud setup, install, authorization, updates, local files, removal.

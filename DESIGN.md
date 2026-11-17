@@ -22,7 +22,7 @@ Local configuration and credentials live beside the standalone venv in `~/.claud
 ~/.claude/google_mcp/config/
   client_secrets.json  # Desktop OAuth client credentials; mode 0600
   state.json           # OAuth access/refresh token; mode 0600
-  drive.json           # ID of the app-created mcp_default Drive folder; mode 0600
+  drive.json           # IDs of the app-created mcp_default and google_mcp_files folders; mode 0600
 ```
 
 All credentials and tokens remain local. Gmail, Calendar, and Drive API calls go directly from the local process to Google over HTTPS. The one request outside Google is `unsubscribe_one_click` (see [unsubscribe](#unsubscribe)), which carries no Google credentials.
@@ -36,7 +36,8 @@ The CLI provides:
 - `google-mcp configure <client-secrets.json>` — copy the downloaded Desktop OAuth client JSON into the user config directory with restrictive permissions.
 - `google-mcp auth` — run interactive OAuth and store the resulting tokens locally.
 - `google-mcp status` — show the authorized account, token expiry, granted scopes, and any required scopes that are missing, without printing secrets.
-- `google-mcp` — run the stdio MCP server.
+- `google-mcp serve` — run the stdio MCP server. A subcommand is required; bare `google-mcp` prints help.
+- `google-mcp files init|status|pull|push` — sync folders of binaries with Drive (see [binary sync CLI](#11-binary-sync-cli)).
 
 Access tokens are refreshed silently while the refresh token is valid. On `invalid_grant`, missing credentials, or expired Testing-mode refresh token, tools return a clear instruction to run `google-mcp auth`. Never include token values in messages or logs.
 
@@ -159,7 +160,7 @@ Applies to `download_file`, `upload_file`, `update_file`, and Gmail's `download_
 - `download_attachment` follows the `download_file` rules below, with the default cache `$TMPDIR/google_mcp/gmail/<message_id>/<filename>` and `<filename>` the sanitized attachment name (fallback `attachment`).
 - `download_file` without `path`: save to `$TMPDIR/google_mcp/<file_id>/<filename>`, always overwriting. This directory is the tool's own cache.
 - `download_file` with `path`: if it is an existing directory or ends with `/`, save as `<path>/<filename>`; otherwise treat it as the full file path. Missing parent directories are created. The download is refused if the target exists unless `overwrite=true`.
-- `<filename>` is the Drive name with `/`, `\`, and control characters replaced by `_` (fallback: file ID, also used for `.` and `..`; names are capped at 200 characters). For exports, the export extension (`.md`, `.csv`, `.txt`, `.png`) is appended unless the name already ends with it.
+- `<filename>` is the Drive name with `/`, `\`, and control characters replaced by `_` (fallback: file ID, also used for `.` and `..`; names are capped at 200 characters). For exports, the export extension (`.md`, `.xlsx`, `.txt`, `.png`) is appended unless the name already ends with it.
 - Downloaded files are written with mode `0600`; created directories with `0700`. Content is written to a temporary file in the same directory, then renamed.
 
 #### Download and export mapping
@@ -167,7 +168,7 @@ Applies to `download_file`, `upload_file`, `update_file`, and Gmail's `download_
 | Drive MIME type | Action | Saved as |
 |---|---|---|
 | `application/vnd.google-apps.document` | export `text/markdown`; if Google rejects it (HTTP 400 or `invalidExportFormat`), export `text/plain` | `.md` / `.txt` |
-| `application/vnd.google-apps.spreadsheet` | export `text/csv` (first tab only) | `.csv` |
+| `application/vnd.google-apps.spreadsheet` | export XLSX, every tab | `.xlsx` |
 | `application/vnd.google-apps.presentation` | export `text/plain` | `.txt` |
 | `application/vnd.google-apps.drawing` | export `image/png` | `.png` |
 | `application/vnd.google-apps.shortcut` | error naming `shortcut_target_id`; the agent downloads the target | — |
@@ -203,7 +204,7 @@ Other extensions with `convert=true` fail validation before any API call. Withou
 
 Tested against the live API on 2026-10-04 with the personal account:
 
-- `search_files` pages correctly and finds files in My Drive and Shared with me. `get_file`, `download_file` (default cache path, explicit directory, explicit file path, refusal without `overwrite`, overwrite with it), PDF, Sheet (CSV), and Doc (Markdown) downloads work; a relative path is rejected.
+- `search_files` pages correctly and finds files in My Drive and Shared with me. `get_file`, `download_file` (default cache path, explicit directory, explicit file path, refusal without `overwrite`, overwrite with it), PDF, Sheet (XLSX, all tabs), and Doc (Markdown) downloads work; a relative path is rejected.
 - Doc Markdown export inlines images as base64 data at the end of the file, so a Doc with images can export to a multi-MB file.
 - `upload_file` creates `mcp_default` at the My Drive root on first use, reuses it afterwards (ID cached in `drive.json`), and `convert=true` produces a Google Doc with the extension stripped from the name.
 - `update_file` replaces the contents of an app-created `.md` file in place (same ID and link) and also of a converted Google Doc; the new content round-trips through export.
@@ -260,6 +261,8 @@ Base URLs: `https://www.googleapis.com/drive/v3` and `https://www.googleapis.com
 | Create folder | `POST /files` with `mimeType=application/vnd.google-apps.folder`, `parents=["root"]`, `appProperties` |
 | Upload (create) | Resumable session: `POST /upload/drive/v3/files?uploadType=resumable&fields=...` with JSON metadata (`name`, `parents`, `appProperties`, and `mimeType` = target Google type when converting) and headers `X-Upload-Content-Type`, `X-Upload-Content-Length`; then `PUT` the whole file to the returned `Location` URL in one request, streaming from disk. |
 | Update content | Same resumable flow with `PATCH /upload/drive/v3/files/{id}?uploadType=resumable&fields=...` (empty metadata), then one `PUT`. |
+| Find a sync blob | `GET /files` with `q = appProperties has { key='sha256' and value='<sha256>' } and '<files folder id>' in parents and trashed = false`, `pageSize=1` |
+| Create a sync blob | The resumable create flow with `fields=id,sha256Checksum`; Google's `sha256Checksum` is compared with the local hash. |
 
 Every upload uses the resumable flow; Google documents the one-request `multipart`/`media` types for files up to 5 MB only. A fresh access token is obtained before starting a session; the session URL needs no retry-on-401 logic beyond one restart of the whole upload.
 
@@ -300,6 +303,8 @@ The MCP client starts the installed Python process over stdio. The process reads
 
 Gmail reads use `gmail.readonly`; draft writes use `gmail.compose`. The server exposes no send, label, archive, or delete operation. `unsubscribe_one_click` is the only request outside Google: it goes to the sender-controlled URL in the message's own header, without Google credentials or cookies, after the host is checked to resolve to public addresses; the agent instructions limit it to senders the user approved. Draft `attachments` read the local files they name, so only files the user asked for are attached; `download_attachment` writes to the local disk, and downloaded attachment content is untrusted data. Because Google bundles sending into `gmail.compose`, the stored token is technically able to send mail; the no-send guarantee comes from the tool surface. Drive reads use `drive.readonly`; Drive writes use `drive.file`, which Google limits to files the app created. `download_file` writes to the local disk and `upload_file` reads the local file it is given, so Drive content is untrusted data. Calendar event writes call Google immediately; shared-event updates, deletion, and invitation responses use Google's attendee notification option, so other people can receive updates. RSVP changes fetch the event first, preserve every attendee, and change only the authorized account's response. Gmail content is untrusted data even when it appears in an MCP result.
 
+The `files` CLI only creates Drive files, in its own `google_mcp_files` folder, and never updates, deletes, or trashes them. Locally it writes only inside the binary folders under the path it is given, and validates every manifest path (repository content, so untrusted) to stay inside its folder.
+
 The local MCP does not send data through a third-party MCP host. It sends the OAuth exchange and every API request directly to Google. To revoke access, run `google-mcp clear-auth` to delete the local tokens and remove the app under the Google Account's third-party connections to revoke Google's copy of the grant. While the OAuth app is External/Testing, expect to repeat browser authorization about every seven days.
 
 ## 10. Primary references
@@ -318,3 +323,56 @@ The local MCP does not send data through a third-party MCP host. It sends the OA
 - [Drive files.list search queries](https://developers.google.com/workspace/drive/api/guides/search-files)
 - [Drive resumable uploads](https://developers.google.com/workspace/drive/api/guides/manage-uploads#resumable)
 - [Drive export MIME types](https://developers.google.com/workspace/drive/api/guides/ref-export-formats)
+
+## 11. Binary sync CLI
+
+`google-mcp files` keeps binary files that code needs on disk (assets, data, model files) out of a git repository: the bytes live in the user's Drive and git tracks only a small manifest per folder. It is a CLI, not an MCP tool, run in the repository it works on; relative paths resolve against the shell's working directory. Code: `files_sync.py`, with the Drive calls in `drive.py`. No new scopes.
+
+### Binary folder
+
+A folder that holds only synced binaries (for example `assets/` beside the code that reads it):
+
+- `.gitignore`, so git sees only the two text files:
+
+  ```text
+  *
+  !.gitignore
+  !files.toml
+  ```
+
+- `files.toml`, the manifest.
+- The binaries, at any depth below the folder. Dotfiles and dot-directories are never synced. Symlinks, non-regular files, and a `files.toml` inside another binary folder are errors that stop work on that folder.
+
+### Manifest (`files.toml`)
+
+```toml
+# Synced with `google-mcp files`; run `google-mcp files pull` to download these files.
+
+["icons/icon-192.png"]
+sha256 = "9f2c41ab…"
+size = 18234
+drive_id = "1AbC…"
+```
+
+- One table per file, keyed by its path relative to the folder, `/`-separated: no empty, `.`, `..`, or dot parts, no backslashes or control characters, and it must resolve inside the folder.
+- Every write sorts the tables by path in code-point order, with `sha256`, `size`, `drive_id` first and other keys sorted after them. The output depends only on the entries, so a push that changes nothing leaves the file byte-identical, and the file is not rewritten.
+- Other keys (strings, integers, booleans) are kept. A malformed manifest is an error naming the file and line.
+
+### Drive layout
+
+- One folder, `google_mcp_files`, at My Drive root, marked `appProperties: {"google_mcp": "files_folder"}` and found like `mcp_default` (ID cached in `drive.json` as `files_folder_id`, then a marker search, then create).
+- Each distinct content is stored once, named `<stem>.<first 8 hex of sha256><ext>` after the local file it was first pushed from (`icon-192.9f2c41ab.png`, `model.9f2c41ab`, `data.tar.9f2c41ab.gz`), with `appProperties: {"google_mcp": "created", "sha256": "<hex digest>"}`. Blobs are found by the `sha256` property, never by name.
+- Append-only: changing a file uploads a new blob; nothing in the folder is ever updated or deleted, so any past manifest can still be pulled.
+
+### Commands
+
+`path` defaults to `.`. A command acts on the binary folder that `path` is inside (looking up to the nearest git root), or else on every binary folder below `path`, skipping dot-directories and `node_modules`.
+
+| Command | Network | Behavior |
+|---|---|---|
+| `files init <dir>` | no | Create `<dir>` if needed and write the `.gitignore` and an empty `files.toml`. Refuses a different existing `.gitignore`, an invalid existing manifest, and a folder inside another binary folder. |
+| `files status [path]` | no | List `missing` (in the manifest, not on disk), `modified` (hash differs), and `new` (on disk, not in the manifest) files. |
+| `files pull [path]` | Drive reads | Make the folder match the manifest: download every missing and modified file, overwriting local changes; matching files are not downloaded and `new` files are reported but left alone. Each download streams to a temporary file beside the target while hashing, and is renamed into place only if the hash matches the manifest. Files and directories get the default modes from the umask. |
+| `files push [path] [--dry-run]` | Drive reads and creates | Make the manifest match the folder: for each new or modified file (at most 100 MB), reuse a blob with the same `sha256` or upload one, check Google's `sha256Checksum`, and record `sha256`, `size`, `drive_id`; drop the entries of missing files (their blobs stay in Drive). `--dry-run` prints the plan without any Drive call or write. |
+
+A failure on one file doesn't stop the others; a failed upload keeps the file's previous entry, or none for a new file. Output is one line per file to stdout, failures to stderr, and a summary line. Exit codes: 0 done, 1 some files failed (or, for `status`, anything listed), 2 usage, folder, or manifest error.

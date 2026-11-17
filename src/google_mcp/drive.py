@@ -7,7 +7,7 @@ import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, BinaryIO, cast
 from urllib.parse import quote
 
 from google_mcp import auth, local_files
@@ -27,9 +27,11 @@ MARKER_KEY = "google_mcp"
 CREATED_MARKER = "created"
 DEFAULT_FOLDER_MARKER = "default_folder"
 DEFAULT_FOLDER_NAME = "mcp_default"
-DEFAULT_FOLDER_QUERY = (
-    f"appProperties has {{ key='{MARKER_KEY}' and value='{DEFAULT_FOLDER_MARKER}' }} and trashed = false"
-)
+DEFAULT_FOLDER_KEY = "default_folder_id"
+FILES_FOLDER_MARKER = "files_folder"
+FILES_FOLDER_NAME = "google_mcp_files"
+FILES_FOLDER_KEY = "files_folder_id"
+SHA256_KEY = "sha256"
 
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 
@@ -41,7 +43,7 @@ FILE_FIELDS = (
 # Drive MIME type -> ordered (export MIME type, extension) candidates.
 EXPORTS: dict[str, tuple[tuple[str, str], ...]] = {
     DOC_MIME: (("text/markdown", ".md"), ("text/plain", ".txt")),
-    SHEET_MIME: (("text/csv", ".csv"),),
+    SHEET_MIME: (("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"),),
     NATIVE_PREFIX + "presentation": (("text/plain", ".txt"),),
     NATIVE_PREFIX + "drawing": (("image/png", ".png"),),
 }
@@ -230,17 +232,16 @@ def _strip_extension(name: str) -> str:
     return stem if stem and extension.lower() in CONVERSIONS else name
 
 
-def _default_folder_path() -> Path:
+def _folders_path() -> Path:
     return auth.config_dir() / "drive.json"
 
 
-def _stored_default_folder() -> str | None:
+def _stored_folders() -> dict[str, Any]:
     try:
-        value = json.loads(_default_folder_path().read_text())
+        value = json.loads(_folders_path().read_text())
     except (OSError, ValueError):
-        return None
-    folder_id = value.get("default_folder_id") if isinstance(value, dict) else None
-    return folder_id if isinstance(folder_id, str) and folder_id else None
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def _folder_usable(folder_id: str) -> bool:
@@ -253,15 +254,26 @@ def _folder_usable(folder_id: str) -> bool:
     return not value.get("trashed")
 
 
-def _default_folder() -> str:
-    """Return the ID of the app-created mcp_default folder, finding or creating it as needed."""
-    stored = _stored_default_folder()
+def _app_folder(name: str, marker: str, key: str) -> str:
+    """Return the ID of an app-created folder at My Drive root, found by its private marker.
+
+    The ID is cached in drive.json under `key`; if the cached folder is gone, search by marker, and
+    create the folder only if none exists.
+    """
+    stored_all = _stored_folders()
+    stored = stored_all.get(key)
+    stored = stored if isinstance(stored, str) and stored else None
     if stored and _folder_usable(stored):
         return stored
     found = request(
         "GET",
         f"{BASE_URL}/files",
-        params={"q": DEFAULT_FOLDER_QUERY, "corpora": "user", "pageSize": 1, "fields": "files(id)"},
+        params={
+            "q": f"appProperties has {{ key='{MARKER_KEY}' and value='{marker}' }} and trashed = false",
+            "corpora": "user",
+            "pageSize": 1,
+            "fields": "files(id)",
+        },
     )
     files = found.get("files")
     folder_id = files[0].get("id") if isinstance(files, list) and files and isinstance(files[0], dict) else None
@@ -271,18 +283,23 @@ def _default_folder() -> str:
             f"{BASE_URL}/files",
             params={"fields": "id"},
             json_body={
-                "name": DEFAULT_FOLDER_NAME,
+                "name": name,
                 "mimeType": FOLDER_MIME,
                 "parents": ["root"],
-                "appProperties": {MARKER_KEY: DEFAULT_FOLDER_MARKER},
+                "appProperties": {MARKER_KEY: marker},
             },
         )
         folder_id = created.get("id")
         if not isinstance(folder_id, str) or not folder_id:
             raise GoogleAPIError("Google API did not return the new folder's ID")
     if folder_id != stored:
-        auth.write_private_json(_default_folder_path(), {"default_folder_id": folder_id})
+        auth.write_private_json(_folders_path(), {**_stored_folders(), key: folder_id})
     return folder_id
+
+
+def _default_folder() -> str:
+    """Return the ID of the app-created mcp_default folder, finding or creating it as needed."""
+    return _app_folder(DEFAULT_FOLDER_NAME, DEFAULT_FOLDER_MARKER, DEFAULT_FOLDER_KEY)
 
 
 def upload_file(
@@ -347,3 +364,50 @@ def update_file(file_id: str, path: str) -> dict[str, Any]:
             ) from exc
         raise
     return _file(updated)
+
+
+# Binary sync (`google-mcp files`): append-only blobs in one app-created folder.
+
+
+def files_folder() -> str:
+    """Return the ID of the app-created google_mcp_files folder, finding or creating it as needed."""
+    with _mapped(write=True):
+        return _app_folder(FILES_FOLDER_NAME, FILES_FOLDER_MARKER, FILES_FOLDER_KEY)
+
+
+def find_blob(folder_id: str, sha256: str) -> str | None:
+    """Return the ID of a blob in the files folder whose `sha256` app property matches, if any."""
+    query = (
+        f"appProperties has {{ key='{SHA256_KEY}' and value='{sha256}' }} "
+        f"and '{folder_id}' in parents and trashed = false"
+    )
+    with _mapped():
+        found = request(
+            "GET", f"{BASE_URL}/files", params={"q": query, "corpora": "user", "pageSize": 1, "fields": "files(id)"}
+        )
+    files = found.get("files")
+    blob_id = files[0].get("id") if isinstance(files, list) and files and isinstance(files[0], dict) else None
+    return blob_id if isinstance(blob_id, str) and blob_id else None
+
+
+def upload_blob(source: Path, name: str, folder_id: str, sha256: str) -> dict[str, Any]:
+    """Create a blob in the files folder; return Google's `id` and `sha256Checksum`."""
+    with _mapped(write=True):
+        return resumable_upload(
+            "POST",
+            f"{UPLOAD_URL}/files",
+            source,
+            params={"uploadType": "resumable", "fields": "id,sha256Checksum"},
+            metadata={
+                "name": name,
+                "parents": [folder_id],
+                "appProperties": {MARKER_KEY: CREATED_MARKER, SHA256_KEY: sha256},
+            },
+            content_type=local_files.content_type(source),
+        )
+
+
+def download_blob(file_id: str, destination: BinaryIO) -> int:
+    """Stream a blob's bytes into an open binary file and return the byte count."""
+    with _mapped():
+        return download(_file_url(file_id), destination, params={"alt": "media"})

@@ -28,7 +28,7 @@ From this directory:
 make install
 ```
 
-The installer creates a standalone environment at `~/.claude/google_mcp/venv/` and registers `google-mcp` with Claude Code, Cursor, Codex (if available), and OpenCode (see [local files](#local-files)). Other settings and MCP entries are preserved; invalid configuration is never overwritten. JSONC comments and trailing commas are accepted, but rewriting removes comments. The source checkout is not needed afterwards.
+The installer creates a standalone environment at `~/.claude/google_mcp/venv/` and registers `google-mcp` with Claude Code, Cursor, Codex (if available), and OpenCode as `~/.claude/google_mcp/venv/bin/python -m google_mcp serve` (see [local files](#local-files)). Other settings and MCP entries are preserved; invalid configuration is never overwritten. JSONC comments and trailing commas are accepted, but rewriting removes comments. The source checkout is not needed afterwards.
 
 Then configure and authorize:
 
@@ -48,7 +48,7 @@ Re-run `make install`. OAuth files live under `~/.claude/google_mcp/config/`, be
 
 - OAuth client: `~/.claude/google_mcp/config/client_secrets.json`
 - OAuth state and refresh token: `~/.claude/google_mcp/config/state.json`
-- Drive default folder ID: `~/.claude/google_mcp/config/drive.json`
+- Drive folder IDs (`mcp_default`, `google_mcp_files`): `~/.claude/google_mcp/config/drive.json`
 - Standalone environment: `~/.claude/google_mcp/venv/`
 
 The config directory and files are created with restrictive permissions.

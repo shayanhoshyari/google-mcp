@@ -59,14 +59,27 @@ def make_directories(directory: Path) -> None:
         os.chmod(created, 0o700)
 
 
-def atomic_write(destination: Path, write: Callable[[BinaryIO], int]) -> int:
-    """Write into a temporary file next to the destination with mode 0600, then rename it into place."""
-    make_directories(destination.parent)
+def _umask() -> int:
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
+
+
+def atomic_write(destination: Path, write: Callable[[BinaryIO], int], *, private: bool = True) -> int:
+    """Write into a temporary file next to the destination, then rename it into place.
+
+    Private writes use mode 0600 and create missing directories with 0700. Otherwise the file and
+    directories get the default modes from the umask, as for files other tools read.
+    """
+    if private:
+        make_directories(destination.parent)
+    else:
+        destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(dir=destination.parent, prefix=".google_mcp-", suffix=".part")
     try:
         with os.fdopen(descriptor, "wb") as handle:
             written = write(handle)
-        os.chmod(temporary, 0o600)
+        os.chmod(temporary, 0o600 if private else 0o666 & ~_umask())
         os.replace(temporary, destination)
     except BaseException:
         Path(temporary).unlink(missing_ok=True)

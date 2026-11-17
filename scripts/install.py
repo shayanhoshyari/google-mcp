@@ -98,7 +98,7 @@ def register_opencode() -> None:
         fail(f"Refusing to overwrite {path}: mcp is not an object")
     servers["google-mcp"] = {
         "type": "local",
-        "command": [str(PYTHON), "-m", "google_mcp"],
+        "command": [str(PYTHON), "-m", "google_mcp", "serve"],
         "enabled": True,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -108,7 +108,7 @@ def register_opencode() -> None:
 
 
 def register() -> None:
-    entry = {"command": str(PYTHON), "args": ["-m", "google_mcp"]}
+    entry = {"command": str(PYTHON), "args": ["-m", "google_mcp", "serve"]}
     for label, path in (
         ("Claude Code", Path.home() / ".claude.json"),
         ("Cursor", Path.home() / ".cursor" / "mcp.json"),
@@ -127,7 +127,7 @@ def register() -> None:
 
     codex = shutil.which("codex")
     if codex:
-        run([codex, "mcp", "add", "google-mcp", "--", str(PYTHON), "-m", "google_mcp"])
+        run([codex, "mcp", "add", "google-mcp", "--", str(PYTHON), "-m", "google_mcp", "serve"])
         print(f"Registered google-mcp in Codex: {Path.home() / '.codex' / 'config.toml'}")
     else:
         print("Codex CLI was not found; skipped Codex registration.")

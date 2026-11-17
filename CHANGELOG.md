@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0 - 2026-11-16
+
+- New `google-mcp files init|status|pull|push`: keep folders of binaries in Drive, tracked in git by a sorted `files.toml` manifest. Blobs go to an app-created `google_mcp_files` folder, are found by a `sha256` app property, and are never updated or deleted. No new scopes.
+- Breaking: the MCP server runs only as `google-mcp serve`; bare `google-mcp` prints help. Re-run `make install` to update the Claude Code, Cursor, Codex, and OpenCode registrations.
+- `drive.json` holds both app folder IDs.
+
+## 0.5.3 - 2026-11-10
+
+- `download_file` exports a Google Sheet as XLSX with every tab, instead of CSV of the first tab only.
+
 ## 0.5.2 - 2026-10-28
 
 - HTML-only email bodies keep link targets as `[text](url)` instead of dropping them. Entities are decoded once, so URLs such as `?a=1&copy=2` are no longer mangled.
